@@ -1,130 +1,239 @@
 import json
 import boto3
 import time
+import os
 from datetime import datetime
 from decimal import Decimal
 
 # Initialize AWS services
 dynamodb = boto3.resource('dynamodb')
 cloudwatch = boto3.client('cloudwatch')
-table = dynamodb.Table('YOUR_LOGS_TABLE_NAME')
+
+# Get table name from environment variable
+table_name = os.environ.get('PIPELINE_LOG_TABLE', 'PipelineLogs')
+table = dynamodb.Table(table_name)
 
 def lambda_handler(event, context):
-    """Enhanced pipeline logger that captures timing metrics from all stages"""
-    # Extract timing data from each stage
-    input_metrics = event.get('stage_metrics', {})
-    enhancement_metrics = event.get('enhanced_response', {}).get('metadata', {})
+    """
+    Logs pipeline execution data to DynamoDB and CloudWatch
+    """
+    print(f"Logging to table: {table_name}")
     
-    # Calculate total pipeline processing time
-    total_processing_time = 0
-    stage_times = {}
+    # Extract execution data from Step Functions event
+    execution_data = extract_execution_data(event)
     
-    # Get timing from input analyzer
-    if 'analysis' in event and 'analysis_processing_time_ms' in event['analysis']:
-        input_time = event['analysis']['analysis_processing_time_ms']
-        stage_times['input_analysis'] = input_time
-        total_processing_time += input_time
+    # Log to DynamoDB
+    log_to_dynamodb(execution_data)
     
-    # Get timing from response enhancer
-    if 'enhancement_processing_time_ms' in enhancement_metrics:
-        enhancement_time = enhancement_metrics['enhancement_processing_time_ms']
-        stage_times['response_enhancement'] = enhancement_time
-        total_processing_time += enhancement_time
+    # Send metrics to CloudWatch
+    send_cloudwatch_metrics(execution_data)
     
-    # Create comprehensive log entry
-    log_entry = {
-        'execution_id': context.aws_request_id,
-        'timestamp': datetime.utcnow().isoformat(),
-        'date': datetime.utcnow().strftime('%Y-%m-%d'),
-        'hour': datetime.utcnow().strftime('%Y-%m-%d-%H'),
+    print(f"Successfully logged execution: {execution_data['execution_id']}")
+    
+    return {
+        'statusCode': 200,
+        'message': 'Logging completed successfully',
+        'execution_id': execution_data['execution_id']
+    }
         
-        # Input metrics
-        'input_message': event.get('message', ''),
-        'input_length': len(event.get('message', '')),
-        
-        # Output metrics  
-        'output_message': event.get('enhanced_response', {}).get('reply', ''),
-        'output_length': len(event.get('enhanced_response', {}).get('reply', '')),
-        
-        # Performance metrics
-        'total_processing_time_ms': Decimal(str(round(total_processing_time, 2))),
-        'input_analysis_time_ms': Decimal(str(round(stage_times.get('input_analysis', 0), 2))),
-        'response_enhancement_time_ms': Decimal(str(round(stage_times.get('response_enhancement', 0), 2))),
-        
-        # Analysis results
-        'complexity': event.get('analysis', {}).get('complexity', 'unknown'),
-        'has_technical_terms': event.get('analysis', {}).get('has_technical_terms', False),
-        
-        # Success/Error tracking
+
+def extract_execution_data(event):
+    """
+    Extract and normalize execution data from Step Functions event
+    """
+    timestamp = datetime.utcnow()
+    execution_id = f"exec_{int(timestamp.timestamp())}"
+    
+    # Default values
+    execution_data = {
+        'execution_id': execution_id,
+        'timestamp': timestamp.isoformat(),
+        'date': timestamp.strftime('%Y-%m-%d'),
+        'hour': timestamp.strftime('%Y-%m-%dT%H'),
+        'input': '',
+        'input_length': 0,
+        'output': '',
+        'output_length': 0,
         'success': True,
+        'total_processing_time_ms': 0,
+        'input_analysis_time_ms': 0,
+        'response_enhancement_time_ms': 0,
+        'complexity': 'unknown',
+        'category': 'general',
+        'quality_score': 0.0,
         'error_type': None,
         'error_message': None
     }
     
-    # Store in DynamoDB
-    table.put_item(Item=log_entry)
+    # Extract input data
+    if 'input' in event:
+        execution_data['input'] = str(event['input'])
+        execution_data['input_length'] = len(execution_data['input'])
     
-    # Send metrics to CloudWatch
-    send_cloudwatch_metrics(log_entry)
+    # Extract analysis data
+    if 'analysis' in event:
+        analysis = event['analysis']
+        execution_data['complexity'] = analysis.get('complexity', 'unknown')
+        execution_data['category'] = analysis.get('category', 'general')
+        execution_data['input_analysis_time_ms'] = analysis.get('processing_time_ms', 0)
     
-    print(f"Successfully logged execution: {context.aws_request_id}")
-    print(f"Total processing time: {total_processing_time:.2f}ms")
+    # Extract enhancement data
+    if 'enhanced_response' in event:
+        enhanced = event['enhanced_response']
+        execution_data['output'] = enhanced.get('content', '')
+        execution_data['output_length'] = len(execution_data['output'])
+        execution_data['quality_score'] = enhanced.get('quality_score', 0.0)
+        execution_data['response_enhancement_time_ms'] = enhanced.get('processing_time_ms', 0)
     
-    return {
-        'statusCode': 200,
-        'body': json.dumps({
-            'message': 'Logged successfully',
-            'execution_id': context.aws_request_id,
-            'processing_time_ms': total_processing_time
-        })
-    }
+    # Calculate total processing time
+    execution_data['total_processing_time_ms'] = (
+        execution_data['input_analysis_time_ms'] + 
+        execution_data['response_enhancement_time_ms']
+    )
+    
+    # Check for errors
+    if 'error' in event or event.get('statusCode', 200) >= 400:
+        execution_data['success'] = False
+        execution_data['error_message'] = event.get('error', 'Unknown error')
+        execution_data['error_type'] = classify_error(execution_data['error_message'])
+    
+    print(f"Extracted execution data for {execution_id}")
+    print(f"• Input length: {execution_data['input_length']}")
+    print(f"• Complexity: {execution_data['complexity']}")
+    print(f"• Success: {execution_data['success']}")
+    print(f"• Total time: {execution_data['total_processing_time_ms']}ms")
+    
+    return execution_data
+
+def log_to_dynamodb(execution_data):
+    """
+    Store execution data in DynamoDB
+    """
+    # Convert float values to Decimal for DynamoDB
+    item = {}
+    for key, value in execution_data.items():
+        if isinstance(value, float):
+            item[key] = Decimal(str(value))
+        else:
+            item[key] = value
+    
+    # Write to DynamoDB
+    table.put_item(Item=item)
+    print(f"Logged to DynamoDB: {execution_data['execution_id']}")
 
 
-def send_cloudwatch_metrics(log_entry):
-    """Send custom metrics to CloudWatch for monitoring"""
-    metrics_data = [
+def send_cloudwatch_metrics(execution_data):
+    """
+    Send custom metrics to CloudWatch
+    """
+    metrics = []
+    
+    # Basic metrics
+    metrics.extend([
         {
-            'MetricName': 'TotalProcessingTime',
-            'Value': float(log_entry['total_processing_time_ms']),
-            'Unit': 'Milliseconds',
-            'Dimensions': [
-                {'Name': 'Complexity', 'Value': log_entry['complexity']}
-            ]
-        },
-        {
-            'MetricName': 'InputAnalysisTime', 
-            'Value': float(log_entry['input_analysis_time_ms']),
-            'Unit': 'Milliseconds'
-        },
-        {
-            'MetricName': 'ResponseEnhancementTime',
-            'Value': float(log_entry['response_enhancement_time_ms']), 
-            'Unit': 'Milliseconds'
-        },
-        {
-            'MetricName': 'RequestCount',
+            'MetricName': 'ExecutionCount',
             'Value': 1,
             'Unit': 'Count',
             'Dimensions': [
-                {'Name': 'Success', 'Value': str(log_entry['success'])}
+                {'Name': 'Complexity', 'Value': execution_data['complexity']},
+                {'Name': 'Category', 'Value': execution_data['category']}
+            ]
+        },
+        {
+            'MetricName': 'ProcessingTime',
+            'Value': execution_data['total_processing_time_ms'],
+            'Unit': 'Milliseconds',
+            'Dimensions': [
+                {'Name': 'Complexity', 'Value': execution_data['complexity']}
             ]
         },
         {
             'MetricName': 'InputLength',
-            'Value': log_entry['input_length'],
-            'Unit': 'Count'
+            'Value': execution_data['input_length'],
+            'Unit': 'Count',
+            'Dimensions': [
+                {'Name': 'Category', 'Value': execution_data['category']}
+            ]
         },
         {
-            'MetricName': 'OutputLength', 
-            'Value': log_entry['output_length'],
+            'MetricName': 'OutputLength',
+            'Value': execution_data['output_length'],
             'Unit': 'Count'
         }
-    ]
+    ])
     
-    # Send metrics in batches (CloudWatch has a 20 metric limit per call)
+    # Success/Error metrics
+    if execution_data['success']:
+        metrics.append({
+            'MetricName': 'SuccessfulExecutions',
+            'Value': 1,
+            'Unit': 'Count'
+        })
+        
+        if execution_data['quality_score'] > 0:
+            metrics.append({
+                'MetricName': 'QualityScore',
+                'Value': float(execution_data['quality_score']),
+                'Unit': 'None'
+            })
+    else:
+        metrics.extend([
+            {
+                'MetricName': 'FailedExecutions',
+                'Value': 1,
+                'Unit': 'Count'
+            },
+            {
+                'MetricName': 'ErrorsByType',
+                'Value': 1,
+                'Unit': 'Count',
+                'Dimensions': [
+                    {'Name': 'ErrorType', 'Value': execution_data.get('error_type', 'unknown')}
+                ]
+            }
+        ])
+    
+    # Stage-specific metrics
+    if execution_data['input_analysis_time_ms'] > 0:
+        metrics.append({
+            'MetricName': 'InputAnalysisTime',
+            'Value': execution_data['input_analysis_time_ms'],
+            'Unit': 'Milliseconds'
+        })
+    
+    if execution_data['response_enhancement_time_ms'] > 0:
+        metrics.append({
+            'MetricName': 'ResponseEnhancementTime',
+            'Value': execution_data['response_enhancement_time_ms'],
+            'Unit': 'Milliseconds'
+        })
+    
+    # Send metrics to CloudWatch
     cloudwatch.put_metric_data(
-        Namespace='AI-Pipeline/Analytics',
-        MetricData=metrics_data
+        Namespace='AIPipeline',
+        MetricData=metrics
     )
     
-    print("CloudWatch metrics sent successfully")
+    print(f"Sent {len(metrics)} metrics to CloudWatch")
+
+
+def classify_error(error_message):
+    """
+    Classify error type based on error message
+    """
+    error_message_lower = error_message.lower()
+    
+    if 'timeout' in error_message_lower:
+        return 'timeout'
+    elif 'memory' in error_message_lower or 'out of memory' in error_message_lower:
+        return 'memory'
+    elif 'permission' in error_message_lower or 'access denied' in error_message_lower:
+        return 'permission'
+    elif 'validation' in error_message_lower or 'invalid' in error_message_lower:
+        return 'validation'
+    elif 'network' in error_message_lower or 'connection' in error_message_lower:
+        return 'network'
+    elif 'rate limit' in error_message_lower or 'throttling' in error_message_lower:
+        return 'rate_limit'
+    else:
+        return 'unknown'

@@ -2,9 +2,11 @@ import json
 import boto3
 from boto3.dynamodb.conditions import Key
 from datetime import datetime, timedelta
+import os
 
 dynamodb = boto3.resource('dynamodb')
-table = dynamodb.Table('YOUR_LOGS_TABLE_NAME')  # Replace with your table name
+table_name = os.environ.get('PIPELINE_LOG_TABLE', 'PipelineLogs')
+table = dynamodb.Table(table_name)
 
 def lambda_handler(event, context):
     # Get last 24 hours of data

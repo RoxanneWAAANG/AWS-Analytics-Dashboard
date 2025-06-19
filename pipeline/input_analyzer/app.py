@@ -1,56 +1,135 @@
 import json
+import re
 import time
-from datetime import datetime
+from typing import Dict, Any
 
-def lambda_handler(event, context):
-    """Enhanced input analyzer with timing metrics"""
-    
-    # Capture start time for metrics
+def lambda_handler(event: Dict[str, Any], context) -> Dict[str, Any]:
+    """
+    Analyzes user input to determine complexity and processing requirements
+    """
     start_time = time.time()
+
+    # Extract input from event
+    user_input = event.get('input', '')
+    if not user_input:
+        raise ValueError("No input provided")
     
-    # Input analysis logic
-    message = event.get('message', '')
+    print(f"Analyzing input: {user_input[:100]}...")
     
-    # Analyze the input
-    word_count = len(message.split())
-    char_count = len(message)
-    
-    # Determine complexity
-    if word_count > 20 or '?' in message:
-        complexity = 'high'
-    elif word_count > 10:
-        complexity = 'medium'
-    else:
-        complexity = 'low'
-    
-    # Check for keywords (your existing logic)
-    technical_keywords = ['algorithm', 'machine learning', 'AI', 'database', 'API']
-    has_technical_terms = any(keyword.lower() in message.lower() for keyword in technical_keywords)
+    # Perform analysis
+    analysis = analyze_input(user_input)
     
     # Calculate processing time
-    processing_time_ms = (time.time() - start_time) * 1000
+    processing_time = (time.time() - start_time) * 1000
     
-    # Create analysis result
-    analysis = {
-        'complexity': complexity,
-        'word_count': word_count,
-        'char_count': char_count,
-        'has_technical_terms': has_technical_terms,
-        'requires_detailed_response': complexity == 'high' or has_technical_terms,
-        # Include processing time in analysis
-        'analysis_processing_time_ms': processing_time_ms
+    print(f"Analysis complete in {processing_time:.2f}ms")
+    print(f"Complexity: {analysis['complexity']}")
+    
+    return {
+        'statusCode': 200,
+        'analysis': analysis,
+        'input_length': len(user_input),
+        'processing_time_ms': round(processing_time, 2),
+        'timestamp': time.time()
     }
     
-    # Include timing info in the response for the logger
+
+def analyze_input(user_input: str) -> Dict[str, Any]:
+    """
+    Analyze input text to determine complexity and requirements
+    """
+    # Basic metrics
+    word_count = len(user_input.split())
+    char_count = len(user_input)
+    sentence_count = len(re.split(r'[.!?]+', user_input))
+    
+    # Complexity indicators
+    complexity_score = 0
+    category = "general"
+    
+    # Length-based complexity
+    if char_count > 1000:
+        complexity_score += 3
+    elif char_count > 500:
+        complexity_score += 2
+    elif char_count > 100:
+        complexity_score += 1
+    
+    # Content-based complexity
+    technical_keywords = [
+        'algorithm', 'machine learning', 'neural network', 'database', 
+        'programming', 'code', 'function', 'api', 'architecture',
+        'optimization', 'analysis', 'statistics', 'model', 'prediction'
+    ]
+    
+    creative_keywords = [
+        'story', 'poem', 'creative', 'narrative', 'character',
+        'plot', 'write', 'imagine', 'fiction', 'essay'
+    ]
+    
+    research_keywords = [
+        'research', 'study', 'analysis', 'compare', 'evaluate',
+        'investigate', 'examine', 'report', 'survey', 'data'
+    ]
+    
+    # Categorize and score
+    user_input_lower = user_input.lower()
+    
+    if any(keyword in user_input_lower for keyword in technical_keywords):
+        category = "technical"
+        complexity_score += 2
+    elif any(keyword in user_input_lower for keyword in creative_keywords):
+        category = "creative"
+        complexity_score += 1
+    elif any(keyword in user_input_lower for keyword in research_keywords):
+        category = "research"
+        complexity_score += 3
+    
+    # Question complexity
+    if '?' in user_input:
+        question_count = user_input.count('?')
+        if question_count > 2:
+            complexity_score += 2
+        elif question_count > 1:
+            complexity_score += 1
+    
+    # Multi-part requests
+    if any(indicator in user_input_lower for indicator in ['and', 'also', 'additionally', 'furthermore', 'moreover']):
+        complexity_score += 1
+    
+    # Determine final complexity level
+    if complexity_score >= 6:
+        complexity = "high"
+        confidence = 0.9
+    elif complexity_score >= 3:
+        complexity = "medium"
+        confidence = 0.8
+    else:
+        complexity = "low"
+        confidence = 0.7
+    
+    # Processing requirements based on complexity
+    processing_requirements = {
+        "low": {"cpu": "low", "memory": "low", "estimated_time": 2000},
+        "medium": {"cpu": "medium", "memory": "medium", "estimated_time": 5000},
+        "high": {"cpu": "high", "memory": "high", "estimated_time": 10000}
+    }
+    
     return {
-        **event,
-        'analysis': analysis,
-        'stage_metrics': {
-            'stage': 'input_analysis',
-            'processing_time_ms': processing_time_ms,
-            'input_length': char_count,
-            'output_length': len(str(analysis)),
-            'success': True,
-            'timestamp': datetime.utcnow().isoformat()
+        'complexity': complexity,
+        'category': category,
+        'confidence': confidence,
+        'metrics': {
+            'word_count': word_count,
+            'char_count': char_count,
+            'sentence_count': sentence_count,
+            'complexity_score': complexity_score
+        },
+        'processing_requirements': processing_requirements[complexity],
+        'features': {
+            'has_questions': '?' in user_input,
+            'multi_part': any(indicator in user_input_lower for indicator in ['and', 'also', 'additionally']),
+            'technical_content': any(keyword in user_input_lower for keyword in technical_keywords),
+            'creative_content': any(keyword in user_input_lower for keyword in creative_keywords)
         }
     }
