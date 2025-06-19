@@ -1,0 +1,447 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: AI Pipeline Orchestration with Advanced Analytics
+
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: python3.9
+
+Resources:
+  # ============================================================================
+  # PIPELINE FUNCTIONS
+  # ============================================================================
+  
+  InputAnalyzerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: pipeline/input_analyzer/
+      Handler: app.lambda_handler
+      Policies:
+        - CloudWatchPutMetricPolicy: {}
+
+  ResponseEnhancerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: pipeline/response_enhancer/
+      Handler: app.lambda_handler
+      Policies:
+        - CloudWatchPutMetricPolicy: {}
+
+  PipelineLoggerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: pipeline/pipeline_logger/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          PIPELINE_LOG_TABLE: !Ref PipelineLogTable
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref PipelineLogTable
+        - CloudWatchPutMetricPolicy: {}
+
+  # ============================================================================
+  # NEW ANALYTICS FUNCTIONS
+  # ============================================================================
+  
+  AnalyticsAPIFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: analytics/
+      Handler: dashboard_api.lambda_handler
+      Environment:
+        Variables:
+          PIPELINE_LOG_TABLE: !Ref PipelineLogTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref PipelineLogTable
+      Events:
+        AnalyticsEndpoint:
+          Type: Api
+          Properties:
+            RestApiId: !Ref PipelineApi
+            Path: /analytics
+            Method: get
+            Cors:
+              AllowMethods: "'GET,OPTIONS'"
+              AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              AllowOrigin: "'*'"
+
+  # ============================================================================
+  # DATA STORAGE
+  # ============================================================================
+  
+  # Enhanced DynamoDB Table for Pipeline Logs
+  PipelineLogTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: PipelineLogs
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: execution_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+        - AttributeName: date
+          AttributeType: S
+      KeySchema:
+        - AttributeName: execution_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: DateIndex
+          KeySchema:
+            - AttributeName: date
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+  # S3 Bucket for Dashboard Hosting
+  DashboardBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-analytics-dashboard"
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ['*']
+            AllowedMethods: [GET]
+            AllowedOrigins: ['*']
+
+  # S3 Bucket Policy for Public Read Access
+  DashboardBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DashboardBucket
+      PolicyDocument:
+        Statement:
+          - Sid: PublicReadForGetBucketObjects
+            Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Sub "${DashboardBucket}/*"
+
+  # ============================================================================
+  # STEP FUNCTIONS STATE MACHINE
+  # ============================================================================
+  
+  AIPipelineStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: AIPipeline
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "AI Pipeline with Your Existing Chatbot and Analytics",
+          "StartAt": "AnalyzeInput",
+          "States": {
+            "AnalyzeInput": {
+              "Type": "Task",
+              "Resource": "${InputAnalyzerFunction.Arn}",
+              "Next": "CallExistingChatbot",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "IntervalSeconds": 1,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "LogError",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+            "CallExistingChatbot": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "serverless-chat-ChatFunction-Z5xyYv8N9K1t",
+                "Payload.$": "$"
+              },
+              "ResultPath": "$.chatbot_response",
+              "OutputPath": "$",
+              "Next": "EnhanceResponse",
+              "Retry": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "LogError",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+            "EnhanceResponse": {
+              "Type": "Task",
+              "Resource": "${ResponseEnhancerFunction.Arn}",
+              "Next": "LogResults",
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "LogError",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+            "LogResults": {
+              "Type": "Task",
+              "Resource": "${PipelineLoggerFunction.Arn}",
+              "End": true
+            },
+            "LogError": {
+              "Type": "Task",
+              "Resource": "${PipelineLoggerFunction.Arn}",
+              "End": true
+            }
+          }
+        }
+
+  # ============================================================================
+  # IAM ROLES
+  # ============================================================================
+  
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StepFunctionsExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: '*'
+
+  # ============================================================================
+  # API GATEWAY
+  # ============================================================================
+  
+  PipelineApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      Cors:
+        AllowMethods: "'*'"
+        AllowHeaders: "'*'"
+        AllowOrigin: "'*'"
+
+  PipelineFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: pipeline/
+      Handler: trigger.lambda_handler
+      Environment:
+        Variables:
+          STATE_MACHINE_ARN: !Ref AIPipelineStateMachine
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action:
+              - states:StartExecution
+            Resource: !Ref AIPipelineStateMachine
+      Events:
+        PipelineApi:
+          Type: Api
+          Properties:
+            RestApiId: !Ref PipelineApi
+            Path: /pipeline
+            Method: post
+
+  # ============================================================================
+  # MONITORING & ALERTING
+  # ============================================================================
+  
+  # SNS Topic for Alerts
+  PipelineAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${AWS::StackName}-pipeline-alerts"
+      DisplayName: "AI Pipeline Alerts"
+
+  # CloudWatch Alarms
+  HighErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-high-error-rate"
+      AlarmDescription: "Alert when pipeline error rate exceeds 5%"
+      MetricName: ErrorRate
+      Namespace: AI-Pipeline/Analytics
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref PipelineAlertsTopic
+      TreatMissingData: notBreaching
+
+  HighLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-high-latency"
+      AlarmDescription: "Alert when average processing time exceeds 5 seconds"
+      MetricName: TotalProcessingTime
+      Namespace: AI-Pipeline/Analytics
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 5000
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref PipelineAlertsTopic
+      TreatMissingData: notBreaching
+
+  # CloudWatch Dashboard
+  PipelineDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${AWS::StackName}-analytics"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AI-Pipeline/Analytics", "TotalProcessingTime" ],
+                  [ ".", "InputAnalysisTime" ],
+                  [ ".", "ResponseEnhancementTime" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Processing Time Metrics",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AI-Pipeline/Analytics", "RequestCount", "Success", "True" ],
+                  [ "...", "False" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Request Success/Failure Rate",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AI-Pipeline/Analytics", "InputLength" ],
+                  [ ".", "OutputLength" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Input/Output Length Metrics",
+                "period": 300
+              }
+            },
+            {
+              "type": "log",
+              "x": 12,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "query": "SOURCE '/aws/lambda/${InputAnalyzerFunction}' | SOURCE '/aws/lambda/${ResponseEnhancerFunction}' | SOURCE '/aws/lambda/${PipelineLoggerFunction}'\n| fields @timestamp, @message\n| sort @timestamp desc\n| limit 100",
+                "region": "${AWS::Region}",
+                "title": "Recent Pipeline Logs",
+                "view": "table"
+              }
+            }
+          ]
+        }
+
+# ============================================================================
+# OUTPUTS
+# ============================================================================
+
+Outputs:
+  PipelineApiUrl:
+    Description: "API Gateway endpoint for the pipeline"
+    Value: !Sub "https://${PipelineApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/pipeline"
+    Export:
+      Name: !Sub "${AWS::StackName}-PipelineApiUrl"
+  
+  AnalyticsApiUrl:
+    Description: "API Gateway endpoint for analytics data"
+    Value: !Sub "https://${PipelineApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/analytics"
+    Export:
+      Name: !Sub "${AWS::StackName}-AnalyticsApiUrl"
+  
+  DashboardUrl:
+    Description: "S3 website URL for the analytics dashboard"
+    Value: !Sub "http://${DashboardBucket}.s3-website-${AWS::Region}.amazonaws.com"
+    Export:
+      Name: !Sub "${AWS::StackName}-DashboardUrl"
+  
+  StateMachineArn:
+    Description: "Step Functions State Machine ARN"
+    Value: !Ref AIPipelineStateMachine
+    Export:
+      Name: !Sub "${AWS::StackName}-StateMachineArn"
+  
+  PipelineLogTableName:
+    Description: "DynamoDB table name for pipeline logs"
+    Value: !Ref PipelineLogTable
+    Export:
+      Name: !Sub "${AWS::StackName}-LogTableName"
+  
+  SNSTopicArn:
+    Description: "SNS Topic ARN for pipeline alerts"
+    Value: !Ref PipelineAlertsTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-AlertsTopicArn"
+  
+  CloudWatchDashboardUrl:
+    Description: "CloudWatch Dashboard URL"
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${AWS::StackName}-analytics"
+    Export:
+      Name: !Sub "${AWS::StackName}-CloudWatchDashboardUrl"

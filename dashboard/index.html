@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AI Pipeline Analytics</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .metric-card { 
+            display: inline-block; 
+            margin: 10px; 
+            padding: 20px; 
+            border: 1px solid #ddd; 
+            border-radius: 8px; 
+            min-width: 200px; 
+        }
+        .chart-container { width: 45%; display: inline-block; margin: 20px; }
+        h1 { color: #333; }
+        .metric-value { font-size: 2em; color: #007bff; }
+    </style>
+</head>
+<body>
+    <h1>🤖 AI Pipeline Analytics Dashboard</h1>
+    
+    <div id="metrics">
+        <div class="metric-card">
+            <h3>Total Requests (24h)</h3>
+            <div class="metric-value" id="totalRequests">-</div>
+        </div>
+        <div class="metric-card">
+            <h3>Avg Processing Time</h3>
+            <div class="metric-value" id="avgTime">-</div>
+        </div>
+        <div class="metric-card">
+            <h3>Success Rate</h3>
+            <div class="metric-value" id="successRate">-</div>
+        </div>
+    </div>
+
+    <div class="chart-container">
+        <canvas id="hourlyChart"></canvas>
+    </div>
+    <div class="chart-container">
+        <canvas id="performanceChart"></canvas>
+    </div>
+
+    <script>
+        // Replace with your actual API Gateway endpoint
+        const API_ENDPOINT = 'YOUR_ANALYTICS_API_ENDPOINT';
+        
+        async function loadDashboard() {
+            try {
+                const response = await fetch(API_ENDPOINT);
+                const data = await response.json();
+                
+                // Update metrics
+                document.getElementById('totalRequests').textContent = data.total_requests;
+                document.getElementById('avgTime').textContent = data.avg_processing_time.toFixed(0) + 'ms';
+                document.getElementById('successRate').textContent = data.success_rate.toFixed(1) + '%';
+                
+                // Create charts
+                createHourlyChart(data.hourly_data);
+                createPerformanceChart(data.hourly_data);
+                
+            } catch (error) {
+                console.error('Error loading dashboard:', error);
+            }
+        }
+        
+        function createHourlyChart(hourlyData) {
+            const ctx = document.getElementById('hourlyChart').getContext('2d');
+            new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: hourlyData.map(d => d.hour),
+                    datasets: [{
+                        label: 'Requests per Hour',
+                        data: hourlyData.map(d => d.requests),
+                        borderColor: '#007bff',
+                        backgroundColor: 'rgba(0, 123, 255, 0.1)'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: { title: { display: true, text: 'Request Volume' } }
+                }
+            });
+        }
+        
+        function createPerformanceChart(hourlyData) {
+            const ctx = document.getElementById('performanceChart').getContext('2d');
+            new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: hourlyData.map(d => d.hour),
+                    datasets: [{
+                        label: 'Avg Response Time (ms)',
+                        data: hourlyData.map(d => d.avg_time),
+                        backgroundColor: '#28a745'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: { title: { display: true, text: 'Performance Metrics' } }
+                }
+            });
+        }
+        
+        // Load dashboard on page load and refresh every 60 seconds
+        loadDashboard();
+        setInterval(loadDashboard, 60000);
+    </script>
+</body>
+</html>
