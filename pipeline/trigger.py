@@ -186,14 +186,11 @@ def health_check() -> Dict[str, Any]:
         'timestamp': time.time()
     }
     
-    try:
-        # Check if Step Functions is accessible
-        if STATE_MACHINE_ARN:
-            stepfunctions.describe_state_machine(stateMachineArn=STATE_MACHINE_ARN)
-            health_status['step_functions'] = 'healthy'
-        else:
-            health_status['step_functions'] = 'configuration_error'
-    except Exception as e:
-        health_status['step_functions'] = f'error: {str(e)}'
+    # Check if Step Functions is accessible
+    if STATE_MACHINE_ARN:
+        stepfunctions.describe_state_machine(stateMachineArn=STATE_MACHINE_ARN)
+        health_status['step_functions'] = 'healthy'
+    else:
+        health_status['step_functions'] = 'configuration_error'
     
     return health_status
