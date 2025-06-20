@@ -101,7 +101,7 @@ Retrieves pipeline execution analytics and metrics.
 
 ### Trigger a Pipeline
 ```bash
-curl -X POST https://your-api-gateway-url/Prod/trigger \
+curl -X POST https://nb5nia3lf0.execute-api.us-east-2.amazonaws.com/Prod/trigger \
   -H "Content-Type: application/json" \
   -d '{"input": "Explain machine learning concepts"}'
 ```
@@ -109,10 +109,10 @@ curl -X POST https://your-api-gateway-url/Prod/trigger \
 ### Get Analytics
 ```bash
 # Get last 24 hours
-curl https://your-api-gateway-url/Prod/analytics
+curl https://nb5nia3lf0.execute-api.us-east-2.amazonaws.com/Prod/analytics
 
 # Get last 6 hours
-curl https://your-api-gateway-url/Prod/analytics?hours=6
+curl https://nb5nia3lf0.execute-api.us-east-2.amazonaws.com/Prod/analytics?hours=6
 ```
 
 ## Project Structure
@@ -192,8 +192,6 @@ The system uses:
 - Lambda with pay-per-use
 - API Gateway with request-based pricing
 - Step Functions standard workflows
-
-Estimated cost for moderate usage: $1-5 per month.
 
 ## Security
 
